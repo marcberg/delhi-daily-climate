@@ -1,0 +1,413 @@
+---
+title: "Forecast on climate in New Dehli"
+author: "Marcus Bergdahl"
+date: "16 oktober 2019"
+output: ioslides_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r load libraries, fig.cap = "", include = FALSE}
+source(paste(getwd(), "/Scripts/load_packages.R", sep = ""))
+source(paste(getwd(), "/Scripts/load_data.R", sep = ""))
+```
+
+## Background
+
+- I wanted to re-use the work I did in my master thesis on new data.
+- In the thesis I wrote my own functions for doing Bayesian vector autoregression which I applied on data from an A/B-test. The goal then was to early try to see the long term effects.
+- Now I will use data on the climate in New Dehli which I downloaded from Kaggle.
+- I have changed some things on my original code so I now also include seasonal effects and trend.
+- First I will forecast based on the existing train-dataset and compare my predictions against the existing test-dataset. Then I will use less data in the train-dataset which I move to the test-dataset to see the performance for longer forecasts.
+
+## First glimpse of the data
+
+```{r glimpse of the data, out.width = "100%", out.height = "100%"}
+
+data_train %>%
+  gather(key, value, -date) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+    geom_line(aes(color = key), size = 1) +
+    theme_minimal() +
+    facet_grid(key ~ ., scales = "free_y")
+
+```
+
+
+## Removing outliers
+
+Removing 9 dates where "meanpressure" < 950 or "meanpressure" > 1050
+
+```{r remoiving outlier, include=FALSE}
+
+data_train %>%
+  filter(meanpressure < 950 | meanpressure > 1050) %>% 
+  summarise(filtered_out_obs = n()) %>%
+  as.data.frame()
+
+```
+
+```{r glimpse of the data after removing of outliers, out.width = "100%", out.height= "80%"}
+
+data_train %>%
+  filter(meanpressure > 950 & meanpressure < 1050) %>% 
+  gather(key, value, -date) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+    geom_line(aes(color = key), size = 1) +
+    theme_minimal() +
+    facet_grid(key ~ ., scales = "free_y")
+
+```
+
+## Monthly seasonal effects
+
+Average values for each months shows all four feature has seasonal effects 
+
+```{r seasonal effects, out.width = "100%", out.height = "80%"}
+data_train %>%
+        filter(meanpressure > 950 & meanpressure < 1050) %>% 
+        mutate(month_num = month(date)) %>%
+        group_by(month_num) %>%
+        summarise(
+          mean_humidity = mean(humidity),
+          mean_meanpressure = mean(meanpressure),
+          mean_meantemp = mean(meantemp),
+          mean_wind_speed = mean(wind_speed)) %>%
+        gather(key, value, -month_num) %>%
+  
+        ggplot(mapping = aes(x = month_num, y = value)) + 
+        geom_line(aes(color = key), stat = "identity") +
+        theme_minimal() +
+        facet_wrap(key ~ ., scales = "free_y", nrow=2)
+```
+
+
+## Features correlates with each other and have little trend effect
+
+```{r correlation}
+
+corrs <- data_train %>% 
+          mutate(trend = 1:n()) %>%
+          filter(meanpressure > 950 & meanpressure < 1050) %>% 
+          select_if(is.numeric) %>% 
+          filter_all(all_vars(!is.na(.))) %>% 
+          cor(method = "pearson")
+
+corrplot(as.matrix(corrs))
+
+```
+
+
+## Notes after exploration
+
+- Feature "meanpressure" has 9 outliers which we removes
+- There is a seasonality effect
+- The features correlates with each other which is good for when building a Bayesian vector autoregression-model
+- "temp" and "humidity" has a small correlation with time
+
+```{r setup data, include = FALSE}
+
+source(paste(getwd(), "/Scripts/month_dummies_function.R", sep = ""))
+source(paste(getwd(), "/Scripts/data_setup.R", sep = ""))
+
+index_ok <- data_train$meanpressure > 950 & data_train$meanpressure < 1050
+setup_result <- setup_data(matrix = as.matrix(data_train[index_ok,2:5]), 
+                            p = 1,
+                            date = data_train[index_ok,1] %>% pull())
+
+```
+
+```{r BVAR, include = FALSE}
+
+source(paste(getwd(), "/Scripts/bvar_function.R", sep = ""))
+
+days_forecast <- 113
+gibbs_iterations <- 10
+
+BVAR_forecast_result <- BVAR_forecast(H=days_forecast,
+                                        R=gibbs_iterations,
+                                        Y=setup_result$Y,
+                                        Z=setup_result$Z,
+                                        z=setup_result$z,
+                                        p=setup_result$p)
+
+forecast <- cbind(data_test[,1],
+              apply(BVAR_forecast_result[[1]], 2, median),
+              apply(BVAR_forecast_result[[2]], 2, median),
+              apply(BVAR_forecast_result[[3]], 2, median),
+              apply(BVAR_forecast_result[[4]], 2, median))
+
+colnames(forecast) <- c("date",colnames(data_test[,2:5]))
+
+```
+
+
+## It's time to forecast!
+
+- Vector auoregression (VAR) uses all the metrics past values when forcasting.
+- We will use a Bayesian approach with non-informative priors which lower the risk of overfitting
+- Bayesian vector autoregression (BVAR) use gipps sampling which generates samples from a posterior multivariate distribution. For each prediction we will estimate the dates posterior distribution with 1000 samples.
+
+
+## Forecast 
+
+```{r forecast plot, out.width = "100%"}
+
+
+rbind(data_train %>%
+        filter(meanpressure > 950 & meanpressure < 1050) %>% 
+        gather(key, value, -date) %>%
+        mutate(type = "data"),
+  
+      forecast %>%
+        gather(key, value, -date) %>%
+            mutate(type = "forecast")) %>%
+  
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = type), size = 1) +
+  theme_minimal() +
+  facet_grid(key ~ ., scale = "free_y")
+
+
+```
+
+## Estimation with its 95% confidence intervalls compared to real data
+
+```{r confidence intervall, out.width = "100%"}
+
+
+m <- 4
+# estimation
+pred <- list()
+for(i in 1:days_forecast){
+  pred[[i]] <- matrix(0, ncol=3, nrow=days_forecast)
+  colnames(pred[[i]]) <- c('Median', 'Lower CI','Upper CI')  
+}
+
+for(j in 1:m){
+  for(i in 1:days_forecast){
+    pred[[j]][i,1] <- median(BVAR_forecast_result[[j]][,i])
+    pred[[j]][i,2] <- sort(BVAR_forecast_result[[j]][,i])[1+round(gibbs_iterations*0.025)]
+    pred[[j]][i,3] <- sort(BVAR_forecast_result[[j]][,i])[round(gibbs_iterations*0.975)]
+  }
+}
+
+
+
+p1 <- rbind(
+  data_test %>%
+    dplyr::select(date, humidity) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test[,1],
+                pred[[2]]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("humidity", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal() +
+  labs(title = "humidity", y = "humidity") +
+  theme(legend.title=element_blank())
+
+p2 <- rbind(
+  data_test %>%
+    dplyr::select(date, meanpressure) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test[,1],
+                pred[[4]]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("meanpressure", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal() +
+  labs(title = "meanpressure", y = "meanpressure") +
+  theme(legend.title=element_blank())
+
+p3 <- rbind(
+  data_test %>%
+    dplyr::select(date, meantemp) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test[,1],
+                pred[[1]]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("meantemp", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal()+
+  labs(title = "meantemp", y = "meantemp") +
+  theme(legend.title=element_blank())
+
+p4 <- rbind(
+  data_test %>%
+    dplyr::select(date, wind_speed) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test[,1],
+                pred[[3]]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("wind_speed", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal() +
+  labs(title = "wind_speed", y = "wind_speed") +
+  theme(legend.title=element_blank())
+
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2, common.legend = TRUE)
+# blir fel med legends
+
+```
+
+## Forecasting a longer period
+
+```{r}
+
+cut_date <- "2015-12-31"
+data_train_2 <- data_train %>% filter(date <= cut_date)
+data_test_2 <- rbind(data_train %>% filter(date > cut_date), data_test)
+
+index_train_ok <- data_train_2$meanpressure > 950 & data_train_2$meanpressure < 1050
+index_test_ok <- data_test_2$meanpressure > 950 & data_test_2$meanpressure < 1050
+setup_result_2 <- setup_data(matrix = as.matrix(data_train_2[index_train_ok,2:5]), 
+                            p = 1,
+                            date = data_train_2[index_train_ok,1] %>% pull())
+
+days_forecast_2 <- 480
+gibbs_iterations_2 <- 10
+
+BVAR_forecast_result_2 <- BVAR_forecast(H=days_forecast_2,
+                                        R=gibbs_iterations_2,
+                                        Y=setup_result_2$Y,
+                                        Z=setup_result_2$Z,
+                                        z=setup_result_2$z,
+                                        p=setup_result_2$p)
+
+forecast_2 <- cbind(data_test_2[,1],
+              apply(BVAR_forecast_result_2[[1]], 2, median),
+              apply(BVAR_forecast_result_2[[2]], 2, median),
+              apply(BVAR_forecast_result_2[[3]], 2, median),
+              apply(BVAR_forecast_result_2[[4]], 2, median))
+
+colnames(forecast_2) <- c("date",colnames(data_test_2[,2:5]))
+
+```
+
+
+I have now moved all the data from 2016 to the test-dataset because I wanted to test forecasting a longer period
+
+```{r, out.width = "100%"}
+
+rbind(data_train_2 %>%
+        filter(meanpressure > 950 & meanpressure < 1050) %>% 
+        gather(key, value, -date) %>%
+        mutate(type = "data"),
+  
+      forecast_2 %>%
+        gather(key, value, -date) %>%
+            mutate(type = "forecast")) %>%
+  
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = type), size = 1) +
+  theme_minimal() +
+  facet_grid(key ~ ., scale = "free_y")
+```
+
+## Estimation with its 95% confidence intervalls compared to real data
+
+```{r confidence intervall - long forecast, out.width = "100%"}
+
+
+m <- 4
+# estimation
+pred_2 <- list()
+for(i in 1:days_forecast_2){
+  pred_2[[i]] <- matrix(0, ncol=3, nrow=days_forecast_2)
+  colnames(pred_2[[i]]) <- c('Median', 'Lower CI','Upper CI')  
+}
+
+for(j in 1:m){
+  for(i in 1:days_forecast_2){
+    pred_2[[j]][i,1] <- median(BVAR_forecast_result_2[[j]][,i])
+    pred_2[[j]][i,2] <- sort(BVAR_forecast_result_2[[j]][,i])[1+round(gibbs_iterations_2*0.025)]
+    pred_2[[j]][i,3] <- sort(BVAR_forecast_result_2[[j]][,i])[round(gibbs_iterations_2*0.975)]
+  }
+}
+
+
+
+p1 <- rbind(
+  data_test_2 %>%
+    filter(meanpressure > 950 & meanpressure < 1050) %>%
+    dplyr::select(date, humidity) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test_2[index_test_ok,1],
+                pred_2[[2]][index_test_ok,]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("humidity", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal() +
+  labs(title = "humidity", y = "humidity") +
+  theme(legend.title=element_blank())
+
+p2 <- rbind(
+  data_test_2 %>%
+    filter(meanpressure > 950 & meanpressure < 1050) %>%
+    dplyr::select(date, meanpressure) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test_2[index_test_ok,1],
+                pred_2[[4]][index_test_ok,]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("meanpressure", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal() +
+  labs(title = "meanpressure", y = "meanpressure") +
+  theme(legend.title=element_blank())
+
+p3 <- rbind(
+  data_test_2 %>%
+    filter(meanpressure > 950 & meanpressure < 1050) %>%
+    dplyr::select(date, meantemp) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test_2[index_test_ok,1],
+                pred_2[[1]][index_test_ok,]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("meantemp", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal()+
+  labs(title = "meantemp", y = "meantemp") +
+  theme(legend.title=element_blank())
+
+p4 <- rbind(
+  data_test_2 %>%
+    filter(meanpressure > 950 & meanpressure < 1050) %>%
+    dplyr::select(date, wind_speed) %>%
+    gather(key, value, -date),
+  
+  cbind(date = data_test_2[index_test_ok,1],
+                pred_2[[3]][index_test_ok,]) %>%
+    gather(key, value, -date)) %>%
+  mutate(key = factor(key, levels = c("wind_speed", 'Lower CI', 'Median','Upper CI'))) %>%
+  ggplot(mapping = aes(x = date, y = value)) + 
+  geom_line(aes(color = key), size = 1) +
+  theme_minimal() +
+  labs(title = "wind_speed", y = "wind_speed") +
+  theme(legend.title=element_blank())
+
+ggarrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+# blir fel med legends
+
+```
+
+## Summary
+
+- Perhaps this dataset wasn't the most challenging and you could probably solved this with a much easier method. But the purpose with this project was to play around with the code I used in my master thesis just for fun.
+- If we tried some other methods we could compare the methods against each other by evaluating some metrics like for example mean square error.

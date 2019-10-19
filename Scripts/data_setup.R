@@ -1,12 +1,3 @@
-# function that create dummies based on month
-month_num <- function(date){
-  mth <- month(date)
-  vec <- rep(0, 12)
-  vec[mth] <- 1
-  return(matrix(vec[1:11], 1))
-}
-
-
 # This function should give me the right matrices that will be used when forecasting with BVAR.
 
 #### INPUT
@@ -37,20 +28,18 @@ setup_data <- function(matrix, p=1, date=NULL){
     }
   }
   
-  if(trend){
-    Z <- cbind(Z, 1:nrow(Z))
-  }
+  Z <- cbind(Z, 1:nrow(Z))
   
   d <- 0  
-  if(seasonal){ # add seasonal dummies to Z
-    dummies <- matrix(0, ncol=11, nrow=(T-p))
-    wd <- date[(p+1):length(date)]
-    for(i in (p):(length(date)-p)){
-      dummies[i,] <- month_num(wd[i])
-    }
-    d <- 11
-    Z <- cbind(Z, dummies)
+  # add seasonal dummies to Z
+  dummies <- matrix(0, ncol=11, nrow=(T-p))
+  wd <- date[(p+1):length(date)]
+  for(i in (p):(length(date)-p)){
+    dummies[i,] <- month_num(wd[i])
   }
+  d <- 11
+  Z <- cbind(Z, dummies)
+  
   
   Y <- matrix[(p+1):nrow(matrix),] # Fix Y depending on how many lags there are
   colnames(Y) <- rownames(Y) <- colnames(Z) <- rownames(Z) <- NULL # remove ugly rownames
@@ -58,6 +47,8 @@ setup_data <- function(matrix, p=1, date=NULL){
   d <- 1+d # intercept + dummies 
   k <- m*p+d # number of coefficients
   p <- p # number of lags
+  
+  #### z får sina värden från Y, men jag fattar inte varför Y och Z inte är riktigt samma??? eller är de det???
   
   # Fix z (small) that will be the values for the first forecast in BVAR
   o <- matrix(Y[nrow(Y):(nrow(Y)-p+1),], ncol=m)
@@ -69,15 +60,10 @@ setup_data <- function(matrix, p=1, date=NULL){
   }
   
   # add trend-feature
-  r <- c(r, as.vector(Z[nrow(Y), 5]+1))
+  r <- c(r, as.vector(Z[nrow(Y), 6]+1))
   
   # add month-dummies
   z <- matrix(c(1, as.vector(r), month_num(wd[i]+1)), nrow=1) 
   
   return(list(Z = Z, Y = Y, T = T, k = k, p = p, d = d, m = m, z=z))
 }
-
-setup_result <- setup_data(matrix = as.matrix(data_train[,2:4]), 
-                            p = 1,
-                            date = data_train[,1] %>% pull(),
-                            seasonal = TRUE)
